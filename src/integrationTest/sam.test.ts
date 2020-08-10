@@ -14,19 +14,14 @@ import { getSamCliContext } from '../../src/shared/sam/cli/samCliContext'
 import { runSamCliInit, SamCliInitArgs } from '../../src/shared/sam/cli/samCliInit'
 import { assertThrowsError } from '../../src/test/shared/utilities/assertUtils'
 import { Language } from '../shared/codelens/codeLensUtils'
+import { LaunchConfiguration } from '../shared/debug/launchConfiguration'
 import { VSCODE_EXTENSION_ID } from '../shared/extensions'
 import { fileExists } from '../shared/filesystemUtilities'
 import { getLogger } from '../shared/logger'
 import { WinstonToolkitLogger } from '../shared/logger/winstonToolkitLogger'
-import { CODE_TARGET_TYPE } from '../shared/sam/debugger/awsSamDebugConfiguration'
-import { SamDebugConfigProvider } from '../shared/sam/debugger/awsSamDebugger'
 import { AddSamDebugConfigurationInput } from '../shared/sam/debugger/commands/addSamDebugConfiguration'
 import { findParentProjectFile } from '../shared/utilities/workspaceUtils'
-import * as testutil from '../test/testUtil'
 import { activateExtension, getCodeLenses, getTestWorkspaceFolder, sleep, TIMEOUT } from './integrationTestsUtilities'
-import { FakeExtensionContext } from '../test/fakeExtensionContext'
-import { NodejsDebugConfiguration } from '../lambda/local/debugConfiguration'
-import { invokeTypescriptLambda } from '../shared/sam/debugger/typescriptSamDebug'
 
 const projectFolder = getTestWorkspaceFolder()
 
@@ -40,17 +35,12 @@ interface TestScenario {
 // When testing additional runtimes, consider pulling the docker container in buildspec\linuxIntegrationTests.yml
 // to reduce the chance of automated tests timing out.
 const scenarios: TestScenario[] = [
-    {
-        runtime: 'nodejs10.x',
-        path: 'hello-world/app.js',
-        debugSessionType: 'node2',
-        language: 'javascript',
-    },
-    { runtime: 'nodejs12.x', path: 'hello-world/app.js', debugSessionType: 'node2', language: 'javascript' },
-    { runtime: 'python2.7', path: 'hello_world/app.py', debugSessionType: 'python', language: 'python' },
-    { runtime: 'python3.6', path: 'hello_world/app.py', debugSessionType: 'python', language: 'python' },
+    { runtime: 'nodejs10.x', path: 'hello-world/app.js', debugSessionType: 'pwa-node', language: 'javascript' },
+    { runtime: 'nodejs12.x', path: 'hello-world/app.js', debugSessionType: 'pwa-node', language: 'javascript' },
+    // { runtime: 'python2.7', path: 'hello_world/app.py', debugSessionType: 'python', language: 'python' },
+    // { runtime: 'python3.6', path: 'hello_world/app.py', debugSessionType: 'python', language: 'python' },
     { runtime: 'python3.7', path: 'hello_world/app.py', debugSessionType: 'python', language: 'python' },
-    { runtime: 'python3.8', path: 'hello_world/app.py', debugSessionType: 'python', language: 'python' },
+    // { runtime: 'python3.8', path: 'hello_world/app.py', debugSessionType: 'python', language: 'python' },
     // { runtime: 'dotnetcore2.1', path: 'src/HelloWorld/Function.cs', debugSessionType: 'coreclr' }
 ]
 
@@ -222,6 +212,7 @@ describe('SAM Integration Tests', async () => {
                 let subSuiteTestLocation: string
 
                 let samAppCodeUri: vscode.Uri
+                let appPath: string
                 let cfnTemplatePath: string
 
                 before(async function() {
@@ -233,7 +224,7 @@ describe('SAM Integration Tests', async () => {
 
                     await createSamApplication(subSuiteTestLocation)
                     // TODO: useful?
-                    const appPath = path.join(subSuiteTestLocation, samApplicationName, scenario.path)
+                    appPath = path.join(subSuiteTestLocation, samApplicationName, scenario.path)
                     cfnTemplatePath = path.join(subSuiteTestLocation, samApplicationName, 'template.yaml')
                     samAppCodeUri = await openSamAppFile(appPath)
                 })
@@ -286,7 +277,7 @@ describe('SAM Integration Tests', async () => {
                     assertCodeLensReferencesHasSameRoot(codeLens, projectRoot!)
                 }).timeout(TIMEOUT)
 
-                it('invokes the Debug Local CodeLens', async () => {
+                it('invokes and attaches on debug request (F5)', async () => {
                     assert.strictEqual(
                         vscode.debug.activeDebugSession,
                         undefined,
@@ -335,44 +326,32 @@ describe('SAM Integration Tests', async () => {
                         )
                     })
 
-                    // const tempFolder = await makeTemporaryToolkitFolder()
-                    const fakeContext = await FakeExtensionContext.getFakeExtContext()
-                    const debugConfigProvider = new SamDebugConfigProvider(fakeContext)
-                    const folder = testutil.getWorkspaceFolder(projectFolder)
-
-                    // const appDir = pathutil.normalize(
-                    //     path.join(testutil.getProjectDir(), 'testFixtures/workspaceFolder/js-manifest-in-root/')
-                    // )
-                    const input = {
+                    const rootUri = vscode.Uri.file(appPath)
+                    const launchConfig = new LaunchConfiguration(rootUri)
+                    const testConfig = {
                         type: 'aws-sam',
-                        name: 'whats in a name',
                         request: 'direct-invoke',
+                        name: 'test-config-1',
                         invokeTarget: {
-                            target: CODE_TARGET_TYPE,
-                            lambdaHandler: 'my.test.handler',
-                            projectRoot: 'src',
+                            target: 'template',
+                            logicalId: 'HelloWorldFunction',
+                            templatePath: cfnTemplatePath,
+                            //projectRoot: subSuiteTestLocation,
+                            //lambdaHandler: 'StockBuyer::StockBuyer.Function::FunctionHandler',
                         },
                         lambda: {
-                            runtime: 'nodejs12.x',
-                            // For target=code these envvars are written to the input-template.yaml.
-                            environmentVariables: {
-                                'test-envvar-1': 'test value 1',
-                                'test-envvar-2': 'test value 2',
-                            },
-                            memoryMb: 512,
-                            timeoutSec: 9000,
-                            event: {
-                                json: {
-                                    'test-payload-key-1': 'test payload value 1',
-                                    'test-payload-key-2': 'test payload value 2',
-                                },
-                            },
+                            environmentVariables: {},
+                            payload: {},
+                            // runtime: scenario.runtime,
                         },
                     }
-                    const resolvedConfig = (await debugConfigProvider.resolveDebugConfiguration(folder, input))!
-                    resolvedConfig.type = 'node'
-                    await invokeTypescriptLambda(fakeContext, resolvedConfig as NodejsDebugConfiguration)
+                    // TODO: launchConfig.getDebugConfigurations() is empty after this,
+                    // but launch.json *does* have the content in it, so F5 works.
+                    // Bug/quirk with LaunchConfiguration impl?
+                    await launchConfig.addDebugConfiguration(testConfig)
 
+                    // Invoke "F5".
+                    await vscode.commands.executeCommand('workbench.action.debug.start')
                     // await vscode.commands.executeCommand('workbench.action.debug.selectandstart')
 
                     await debugSessionStartedAndStoppedPromise
@@ -399,7 +378,7 @@ describe('SAM Integration Tests', async () => {
             debugSession: vscode.DebugSession,
             expectedSessionType: string
         ): string | undefined {
-            if (debugSession.name !== 'SamLocalDebug') {
+            if (debugSession.name !== 'SamLocalDebug' && debugSession.name !== 'Remote Process [0]') {
                 return `Unexpected Session Name ${debugSession}`
             }
 
